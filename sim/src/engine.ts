@@ -1,7 +1,7 @@
 // Port of the firmware's crossfade engine, brightness scaling, and demo
 // reel (LEDCube3-30-26.ino:195-222, 172-178, 504-540).
 import { CRGB, newBuffer, fillBlack, blend, clamp, randomInt, millis } from './fastled';
-import { startPaletteFade } from './palettes';
+import { startPaletteFade, NUM_PALETTES_TOTAL } from './palettes';
 
 export type AnimFunc = (buf: CRGB[], t: number) => void;
 export type Mode = 'static' | 'audio' | 'voice';
@@ -89,7 +89,7 @@ function tickDemo(): void {
   let next: number;
   do { next = randomInt(demoList.length); } while (next === demoStep && demoList.length > 1);
   demoStep = next;
-  startPaletteFade(randomInt(11));     // random(NUM_PALETTES)=11 incl. Rotate, .ino:527
+  startPaletteFade(randomInt(NUM_PALETTES_TOTAL));   // random(NUM_PALETTES) incl. Rotate, .ino:527
   const [mode, idx] = demoList[demoStep];
   selectAnimation(mode, idx);
 }
