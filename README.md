@@ -4,6 +4,26 @@ work in progress
 link to CAD files in Makerworld:
 https://makerworld.com/en/models/2606835-led-infinity-cube#profileId-2876912
 
+## Web Simulator (`sim/`)
+
+A browser-based 3D showcase that re-implements the firmware's geometry,
+palettes, audio engine, and all 22 animations in TypeScript + Three.js. It
+auto-cycles through every mode/animation, lets you pick any mode, animation,
+palette, and brightness by hand, and can react to your computer's system
+audio (Chrome/Edge on Windows) or a built-in synthetic/demo signal.
+
+```bash
+cd sim
+npm install
+npm run dev      # local dev server
+npm run build    # static bundle in sim/dist
+npm test         # unit tests (geometry, palettes, audio engine, engine)
+```
+
+**Deploy:** pushing changes under `sim/` to `main` builds and publishes the
+site to GitHub Pages via `.github/workflows/deploy-sim.yml`. Enable it once
+under **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+
 ## Pinout (Teensy 4.1)
 
 | Teensy Pin | Function | Connected To | Notes |
