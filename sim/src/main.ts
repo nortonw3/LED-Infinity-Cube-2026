@@ -1,4 +1,5 @@
 import './animations/statics';
+import './animations/audios';
 import { CubeRenderer } from './renderer';
 import { newBuffer } from './fastled';
 import { renderFrame, selectAnimation } from './engine';
