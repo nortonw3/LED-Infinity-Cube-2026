@@ -1,14 +1,9 @@
 // Ports of the STATIC animations from src/animations.h. Source lines are
 // cited per function — the firmware is the source of truth.
 //
-// NOTE on NoiseWorms and Coral: the task brief (docs/superpowers/plans/
-// 2026-07-04-led-cube-web-sim.md, Task 8) gives complete, self-contained
-// formulas for these two that do not match the current firmware content at
-// their cited line ranges (firmware's NoiseWorms is a simpler per-edge-index
-// noise fill, animations.h:429-439, and firmware has no Coral animation at
-// all). Both formulas below are ported verbatim from the brief's explicit
-// spec rather than from firmware, since firmware has no matching source for
-// them. Flagged for human review — see task-8-report.md.
+// NOTE on NoiseWorms and Coral: both are faithful ports of the firmware.
+// NoiseWorms = firmware-ref animations.h:410-419 (voxel-space gradient noise).
+// Coral = firmware-ref animations.h:299-348 (Gray-Scott RD variant).
 import { voxels, graphL, graphR, NUM_LEDS, NUM_EDGES, LEDS_PER_EDGE } from '../geometry';
 import { applyPalette } from '../palettes';
 import { CRGB, clamp, qadd8, randomInt, millis, inoise8, fillBlack } from '../fastled';
@@ -274,7 +269,7 @@ const staticReactionDiffusion: AnimFunc = (buf, _t) => {
   }
 };
 
-// ── Static5: Mobius Braid — animations.h:337-374 ────────────────────
+// ── Static5: Mobius Braid — animations.h:351-388 ────────────────────
 // Three wave carriers wound on different axis pairs, quartic-sharpened
 // into narrow bright ridges, summed and smoothstep-lifted.
 const staticMobiusBraid: AnimFunc = (buf, t) => {
@@ -313,7 +308,7 @@ const staticMobiusBraid: AnimFunc = (buf, t) => {
   }
 };
 
-// ── Static7: Plasma Cube — animations.h:392-402 ─────────────────────
+// ── Static7: Plasma Cube — animations.h:393-403 ─────────────────────
 const staticPlasmaCube: AnimFunc = (buf, t) => {
   for (let i = 0; i < NUM_LEDS; i++) {
     const x = voxels[i].x, y = voxels[i].y, z = voxels[i].z;
@@ -344,12 +339,11 @@ const staticNoiseWorms: AnimFunc = (buf, t) => {
   }
 };
 
-// ── Static10: Coral ──────────────────────────────────────────────────
-// Ported from the task brief's explicit spec (not from firmware — see file
-// header note; firmware has no Coral animation). Same Gray-Scott
-// reaction-diffusion structure as RD (same diffusion rates/timestep/step
-// count), but its own chemical fields and a different feed/kill pair that
-// produces a denser, branching maze texture instead of RD's isolated spots.
+// ── Static10: Coral — animations.h:299-348 ──────────────────────────
+// Same Gray-Scott reaction-diffusion structure as RD, but its own chemical
+// fields and diffusion/feed/kill parameters that produce a denser, branching
+// maze texture instead of RD's isolated spots.
+const CORAL_DA = 0.2, CORAL_DB = 0.08, CORAL_DT = 0.25, CORAL_STEPS = 6;
 const CORAL_FEED = 0.0545, CORAL_KILL = 0.0620;
 const coralA = new Array(NUM_LEDS).fill(1.0);
 const coralB = new Array(NUM_LEDS).fill(0.0);
@@ -389,8 +383,8 @@ function coralStepAll(): void {
     const lapA = coralA[L] + coralA[R] - 2.0 * a;
     const lapB = coralB[L] + coralB[R] - 2.0 * b;
     const rxn = a * b * b;
-    coralA2[i] = clamp(a + RD_DT * (RD_DA * lapA - rxn + CORAL_FEED * (1.0 - a)), 0, 1);
-    coralB2[i] = clamp(b + RD_DT * (RD_DB * lapB + rxn - (CORAL_KILL + CORAL_FEED) * b), 0, 1);
+    coralA2[i] = clamp(a + CORAL_DT * (CORAL_DA * lapA - rxn + CORAL_FEED * (1.0 - a)), 0, 1);
+    coralB2[i] = clamp(b + CORAL_DT * (CORAL_DB * lapB + rxn - (CORAL_KILL + CORAL_FEED) * b), 0, 1);
   }
   for (let i = 0; i < NUM_LEDS; i++) { coralA[i] = coralA2[i]; coralB[i] = coralB2[i]; }
 }
@@ -398,7 +392,7 @@ function coralStepAll(): void {
 const staticCoral: AnimFunc = (buf, _t) => {
   if (!coralReady) { coralSeed(); coralReady = true; }
   coralWatchdog();
-  for (let s = 0; s < RD_STEPS; s++) coralStepAll();
+  for (let s = 0; s < CORAL_STEPS; s++) coralStepAll();
   for (let i = 0; i < NUM_LEDS; i++) {
     const c = applyPalette(clamp(coralB[i] * 3.5, 0, 1));
     buf[i].r = c.r; buf[i].g = c.g; buf[i].b = c.b;
