@@ -5,8 +5,37 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LED Infinity Cube</title>
   <style>
-    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+      font-family: -apple-system, Segoe UI, Roboto, sans-serif; color: #e8e8f0; }
     #app { width: 100%; height: 100%; }
+    #ui {
+      position: fixed; top: 16px; left: 16px; z-index: 10;
+      display: flex; flex-direction: column; gap: 6px;
+      padding: 14px 16px; width: 210px;
+      background: rgba(12, 12, 20, 0.62); backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px;
+      font-size: 13px; transition: opacity 0.4s;
+    }
+    #ui.faded { opacity: 0.28; }
+    #ui:hover { opacity: 1; }
+    #ui strong { font-size: 14px; letter-spacing: 0.02em; margin-bottom: 4px; }
+    #ui label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+      color: #9a9ab0; margin-top: 6px; }
+    #ui select, #ui input[type=range] { width: 100%; }
+    #ui select {
+      background: #1a1a28; color: #e8e8f0; border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 6px; padding: 5px 6px; font-size: 13px;
+    }
+    #ui .row { display: flex; gap: 6px; }
+    #ui button {
+      flex: 1; padding: 6px 8px; font-size: 12px; cursor: pointer;
+      background: #1a1a28; color: #e8e8f0; border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 6px; transition: background 0.15s, border-color 0.15s;
+    }
+    #ui button:hover { background: #262638; }
+    #ui button.active { background: #3a4de0; border-color: #6b7bff; }
+    #ui .err { color: #ff8080; font-size: 11px; min-height: 0; }
+    #ui .err:not(:empty) { margin-top: 6px; }
   </style>
 </head>
 <body>
