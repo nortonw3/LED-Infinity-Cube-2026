@@ -1,23 +1,23 @@
+import './animations/statics';
 import { CubeRenderer } from './renderer';
 import { newBuffer } from './fastled';
-import { voxels, NUM_LEDS } from './geometry';
-import { applyPalette } from './palettes';
+import { renderFrame, selectAnimation } from './engine';
 
 const app = document.getElementById('app')!;
 const cube = new CubeRenderer(app);
 const buf = newBuffer();
 
-// TEMP test pattern: diagonal rainbow sweep (replaced in Task 6)
+selectAnimation('static', 0);
+
+// 45 FPS cap to match TARGET_FPS (config.h) — animation speeds are tuned to it
+const FRAME_MS = 1000 / 45;
+let lastFrame = 0;
 function frame(nowMs: number) {
-  const t = nowMs * 0.001;
-  for (let i = 0; i < NUM_LEDS; i++) {
-    const h = (voxels[i].x + voxels[i].y + voxels[i].z) / 3;
-    const v = (Math.sin(h * 6.28 + t * 2) + 1) * 0.5;
-    const c = applyPalette(v);
-    buf[i].r = c.r; buf[i].g = c.g; buf[i].b = c.b;
-  }
+  requestAnimationFrame(frame);
+  if (nowMs - lastFrame < FRAME_MS) return;
+  lastFrame = nowMs;
+  renderFrame(buf, nowMs * 0.001);
   cube.setColors(buf);
   cube.render();
-  requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
