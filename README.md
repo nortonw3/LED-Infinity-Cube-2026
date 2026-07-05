@@ -6,6 +6,8 @@ https://makerworld.com/en/models/2606835-led-infinity-cube#profileId-2876912
 
 ## Web Simulator (`sim/`)
 
+**Live demo:** https://nortonw3.github.io/LED-Infinity-Cube-2026/
+
 A browser-based 3D showcase that re-implements the firmware's geometry,
 palettes, audio engine, and all 22 animations in TypeScript + Three.js. It
 auto-cycles through every mode/animation, lets you pick any mode, animation,
