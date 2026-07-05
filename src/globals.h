@@ -9,35 +9,7 @@
 #include <Adafruit_SSD1306.h>
 #include <FreeStack.h>
 
-////////////////////////////////////////////////////////////
-// USER CONFIG
-////////////////////////////////////////////////////////////
-
-#define DATA_PIN            2
-#define LED_TYPE            WS2812B
-#define COLOR_ORDER         GRB
-#define MAX_BRIGHTNESS      255
-#define TARGET_FPS          45
-
-#define POWER_VOLTAGE       5
-#define POWER_LIMIT_MA      15000
-
-#define BRIGHTNESS_MIN      5
-#define BRIGHTNESS_MAX      255
-
-#define NUM_EDGES           12
-#define LEDS_PER_EDGE       32
-#define NUM_LEDS            (NUM_EDGES * LEDS_PER_EDGE)
-
-#define ENC_CLK             3
-#define ENC_DT              4
-#define ENC_SW              5
-
-#define OLED_WIDTH          128
-#define OLED_HEIGHT         64
-#define OLED_ADDR           0x3C
-
-#define FFT_BINS            512
+#include "config.h"   // hardware pins + build constants
 
 ////////////////////////////////////////////////////////////
 // TYPES
@@ -46,12 +18,6 @@
 struct Voxel { float x, y, z; };
 
 typedef void (*AnimFunc)(CRGB*, float);
-
-struct AnimGains {
-  float bass;
-  float mid;
-  float high;
-};
 
 
 ////////////////////////////////////////////////////////////
@@ -66,21 +32,12 @@ extern uint8_t currentBrightness;
 
 ////////////////////////////////////////////////////////////
 // EXTERN — AUDIO
+// (Per-band features, beat, and knobs live in the AudioBus
+//  `audio` and globals in audio_engine.h. Only the raw FFT
+//  spectrum is shared here.)
 ////////////////////////////////////////////////////////////
 
 extern float fftBins[FFT_BINS];
-extern float fftGain;
-extern float bassGain, midGain, highGain, voiceGain;
-extern float smoothingFactor;
-extern float bass, mid, high, voiceLevel, speechEnergy, sparkle;
-extern bool  syllableOnset;
-extern float sylEnv;
-extern float beatPhase;
-extern float barPhase;
-extern float tempoConfidence;
-extern float onsetStrength;
-extern bool  beatFired;
-extern float bpm;
 
 ////////////////////////////////////////////////////////////
 // EXTERN — ANIMATION SUPPORT ARRAYS
@@ -138,11 +95,3 @@ void   startPaletteFade(uint8_t newIndex);
 
 // Crossfade
 void   startTransition(AnimFunc target);
-
-// FFT param accessor (used by menu)
-float& fftParamRef(int row);
-
-void applyAnimGains(int idx);
-void restoreAnimGains(int idx);
-
-int pickUpwardEdge(int v, bool &fwd);

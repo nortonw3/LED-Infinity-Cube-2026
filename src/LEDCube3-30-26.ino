@@ -1,6 +1,7 @@
 #include "globals.h"
+#include "cube.h"
 #include "palettes.h"
-#include "beatdetect.h"
+#include "audio_engine.h"
 #include "animations.h"
 //#include "artnet.h"
 
@@ -27,15 +28,10 @@ extern "C" void usage_fault_isr()    __attribute__((weak, alias("fault_isr")));
 
 uint8_t currentBrightness = 128;   // default 50%
 
-bool          fftDebugEnabled = false;
-unsigned long lastDebugPrint  = 0;
-#define DEBUG_INTERVAL_MS 200
-
-// LED + geometry
+// LED buffers  (voxels[] + edge graph now live in cube.h)
 CRGB  leds[NUM_LEDS];
 CRGB  bufferA[NUM_LEDS];
 CRGB  bufferB[NUM_LEDS];
-Voxel voxels[NUM_LEDS];
 
 // Animation support arrays
 float sparkEnvs[NUM_LEDS]     = {0};
@@ -44,25 +40,9 @@ float rdA[NUM_LEDS];
 float rdB[NUM_LEDS];
 float rdA2[NUM_LEDS];
 float rdB2[NUM_LEDS];
-int   rdNeighborL[NUM_LEDS];
-int   rdNeighborR[NUM_LEDS];
 
-// Audio
+// Audio — raw FFT spectrum, fed to the audio engine (audio_engine.h)
 float fftBins[FFT_BINS];
-float bass = 0, mid = 0, high = 0;
-float voiceLevel = 0, speechEnergy = 0, sparkle = 0;
-float fftGain         = 1.0f;
-float bassGain        = 1.0f;
-float midGain         = 1.0f;
-float highGain        = 1.0f;
-float voiceGain       = 1.0f;
-float smoothingFactor = 0.8f;
-
-// Syllable detector state (used by voice animations)
-float sylAvg        = 0;
-float sylEnv        = 0;
-bool  syllableOnset = false;
-float sylLastEnergy = 0;
 
 // Mode + animation indices
 Mode currentMode = STATIC_MODE;
@@ -81,18 +61,15 @@ bool     transitioning      = false;
 float    transitionStart    = 0;
 float    transitionDuration = 2.0f;
 
-AnimGains audioAnimGains[10] = {
-  {1.0f, 1.0f, 1.0f},  // 0 TriAxis
-  {1.0f, 1.0f, 1.0f},  // 1 Impact
-  {1.0f, 1.0f, 1.0f},  // 2 CellAuto
-  {1.0f, 1.0f, 1.0f},  // 3 FreqBands
-  {1.0f, 1.0f, 1.0f},  // 4 BassBloom
-  {1.0f, 1.0f, 1.0f},  // 5 Vortex
-  {1.0f, 1.0f, 1.0f},  // 6 Resonance
-  {1.0f, 1.0f, 1.0f},  // 7 PulseWeb
-  {1.0f, 1.0f, 1.0f},  // 8 SpectrHlix
-  {1.0f, 1.0f, 1.0f},  // 9 Earthquake
-};
+// Per-mode animation counts (see config.h)
+int animCount(Mode m) {
+  switch (m) {
+    case STATIC_MODE: return NUM_STATIC_ANIMS;
+    case AUDIO_MODE:  return NUM_AUDIO_ANIMS;
+    case VOICE_MODE:  return NUM_VOICE_ANIMS;
+    default:          return 1;
+  }
+}
 
 
 ////////////////////////////////////////////////////////////
@@ -108,35 +85,21 @@ AudioConnection          patchCord2(i2s1, 1, fft1024, 0);
 // ================= EEPROM =================
 ////////////////////////////////////////////////////////////
 
-#define EEPROM_MODE_ADDR         0
-#define EEPROM_STATIC_INDEX_ADDR 1
-#define EEPROM_AUDIO_INDEX_ADDR  2
-#define EEPROM_VOICE_INDEX_ADDR  3
-#define EEPROM_PALETTE_ADDR      4
+#define EEPROM_VERSION           2
+#define EEPROM_VERSION_ADDR      0
+#define EEPROM_MODE_ADDR         1
+#define EEPROM_STATIC_INDEX_ADDR 2
+#define EEPROM_AUDIO_INDEX_ADDR  3
+#define EEPROM_VOICE_INDEX_ADDR  4
+#define EEPROM_PALETTE_ADDR      5
+#define EEPROM_BRIGHT_ADDR       6
+#define EEPROM_REACTIVITY_ADDR   8    // float
+#define EEPROM_BEATSENS_ADDR     12   // float
+#define EEPROM_BANDTILT_ADDR     16   // float
 
 void EEPROMWriteFloat(int addr, float value) {
   byte* p = (byte*)(void*)&value;
   for (int i = 0; i < 4; i++) EEPROM.write(addr + i, p[i]);
-}
-
-void saveSettings() {
-  EEPROM.write(EEPROM_MODE_ADDR,         currentMode);
-  EEPROM.write(EEPROM_STATIC_INDEX_ADDR, staticIndex);
-  EEPROM.write(EEPROM_AUDIO_INDEX_ADDR,  audioIndex);
-  EEPROM.write(EEPROM_VOICE_INDEX_ADDR,  voiceIndex);
-  EEPROM.write(EEPROM_PALETTE_ADDR,      currentPaletteIndex);
-  EEPROMWriteFloat(10, fftGain);
-  EEPROMWriteFloat(14, bassGain);
-  EEPROMWriteFloat(18, midGain);
-  EEPROMWriteFloat(22, highGain);
-  EEPROMWriteFloat(26, voiceGain);
-  EEPROMWriteFloat(30, smoothingFactor);
-  EEPROM.write(5, currentBrightness);
-  for (int i = 0; i < 10; i++) {
-    EEPROMWriteFloat(100 + i*12,     audioAnimGains[i].bass);
-    EEPROMWriteFloat(100 + i*12 + 4, audioAnimGains[i].mid);
-    EEPROMWriteFloat(100 + i*12 + 8, audioAnimGains[i].high);
-  }
 }
 
 float EEPROMReadFloat(int addr) {
@@ -146,49 +109,60 @@ float EEPROMReadFloat(int addr) {
   return value;
 }
 
+void saveSettings() {
+  EEPROM.write(EEPROM_VERSION_ADDR,      EEPROM_VERSION);
+  EEPROM.write(EEPROM_MODE_ADDR,         currentMode);
+  EEPROM.write(EEPROM_STATIC_INDEX_ADDR, staticIndex);
+  EEPROM.write(EEPROM_AUDIO_INDEX_ADDR,  audioIndex);
+  EEPROM.write(EEPROM_VOICE_INDEX_ADDR,  voiceIndex);
+  EEPROM.write(EEPROM_PALETTE_ADDR,      currentPaletteIndex);
+  EEPROM.write(EEPROM_BRIGHT_ADDR,       currentBrightness);
+  EEPROMWriteFloat(EEPROM_REACTIVITY_ADDR, reactivity);
+  EEPROMWriteFloat(EEPROM_BEATSENS_ADDR,   beatSensitivity);
+  EEPROMWriteFloat(EEPROM_BANDTILT_ADDR,   bandTilt);
+}
+
 void loadSettings() {
+  // Version mismatch (fresh chip or old layout) → load defaults + persist.
+  if (EEPROM.read(EEPROM_VERSION_ADDR) != EEPROM_VERSION) {
+    currentMode = STATIC_MODE;
+    staticIndex = audioIndex = voiceIndex = 0;
+    currentPaletteIndex = 0;
+    currentBrightness = 128;
+    reactivity = 1.0f; beatSensitivity = 1.0f; bandTilt = 0.0f;
+    currentPalette = previousPalette = palettes[0];
+    paletteFading = false;
+    applyBrightness();
+    saveSettings();
+    return;
+  }
+
   currentMode = (Mode)EEPROM.read(EEPROM_MODE_ADDR);
   staticIndex = EEPROM.read(EEPROM_STATIC_INDEX_ADDR);
   audioIndex  = EEPROM.read(EEPROM_AUDIO_INDEX_ADDR);
   voiceIndex  = EEPROM.read(EEPROM_VOICE_INDEX_ADDR);
 
-  if (currentMode > ARTNET_MODE) currentMode = STATIC_MODE;
-  if (staticIndex >= 10)        staticIndex = 0;
-  if (audioIndex  >= 10)        audioIndex  = 0;
-  if (voiceIndex  >= 10)        voiceIndex  = 0;
+  if (currentMode > ARTNET_MODE)       currentMode = STATIC_MODE;
+  if (staticIndex >= NUM_STATIC_ANIMS) staticIndex = 0;
+  if (audioIndex  >= NUM_AUDIO_ANIMS)  audioIndex  = 0;
+  if (voiceIndex  >= NUM_VOICE_ANIMS)  voiceIndex  = 0;
 
   currentPaletteIndex = EEPROM.read(EEPROM_PALETTE_ADDR);
   if (currentPaletteIndex >= NUM_PALETTES) currentPaletteIndex = 0;
-  currentPalette  = palettes[currentPaletteIndex];
-  previousPalette = palettes[currentPaletteIndex];
+  currentPalette  = palettes[currentPaletteIndex < PALETTE_ROTATE_IDX ? currentPaletteIndex : 0];
+  previousPalette = currentPalette;
   paletteFading   = false;
 
-  fftGain         = EEPROMReadFloat(10);
-  bassGain        = EEPROMReadFloat(14);
-  midGain         = EEPROMReadFloat(18);
-  highGain        = EEPROMReadFloat(22);
-  voiceGain       = EEPROMReadFloat(26);
-  smoothingFactor = EEPROMReadFloat(30);
-
-  currentBrightness = EEPROM.read(5);
+  currentBrightness = EEPROM.read(EEPROM_BRIGHT_ADDR);
   if (currentBrightness < BRIGHTNESS_MIN) currentBrightness = 128;
   applyBrightness();
 
-  if (fftGain        <= 0 || fftGain        > 10)        fftGain        = 1.0f;
-  if (bassGain       <= 0 || bassGain       > 10)        bassGain       = 1.0f;
-  if (midGain        <= 0 || midGain        > 10)        midGain        = 1.0f;
-  if (highGain       <= 0 || highGain       > 10)        highGain       = 1.0f;
-  if (voiceGain      <= 0 || voiceGain      > 10)        voiceGain      = 1.0f;
-  if (smoothingFactor < 0.5f || smoothingFactor > 0.99f) smoothingFactor = 0.8f;
-
-  for (int i = 0; i < 10; i++) {
-    audioAnimGains[i].bass  = EEPROMReadFloat(100 + i*12);
-    audioAnimGains[i].mid   = EEPROMReadFloat(100 + i*12 + 4);
-    audioAnimGains[i].high  = EEPROMReadFloat(100 + i*12 + 8);
-    if (isnan(audioAnimGains[i].bass)  || audioAnimGains[i].bass  <= 0 || audioAnimGains[i].bass  > 3.0f) audioAnimGains[i].bass  = 1.0f;
-    if (isnan(audioAnimGains[i].mid)   || audioAnimGains[i].mid   <= 0 || audioAnimGains[i].mid   > 3.0f) audioAnimGains[i].mid   = 1.0f;
-    if (isnan(audioAnimGains[i].high)  || audioAnimGains[i].high  <= 0 || audioAnimGains[i].high  > 3.0f) audioAnimGains[i].high  = 1.0f;
-}
+  reactivity      = EEPROMReadFloat(EEPROM_REACTIVITY_ADDR);
+  beatSensitivity = EEPROMReadFloat(EEPROM_BEATSENS_ADDR);
+  bandTilt        = EEPROMReadFloat(EEPROM_BANDTILT_ADDR);
+  if (isnan(reactivity)      || reactivity      < 0.1f || reactivity      > 3.0f)  reactivity      = 1.0f;
+  if (isnan(beatSensitivity) || beatSensitivity < 0.1f || beatSensitivity > 3.0f)  beatSensitivity = 1.0f;
+  if (isnan(bandTilt)        || bandTilt        < -1.0f || bandTilt       > 1.0f)  bandTilt        = 0.0f;
 }
 
 ////////////////////////////////////////////////////////////
@@ -204,38 +178,6 @@ void applyBrightness() {
 }
 
 ////////////////////////////////////////////////////////////
-// ================= GEOMETRY =================
-////////////////////////////////////////////////////////////
-
-void mapEdge(int offset, float x1, float y1, float z1,
-                          float x2, float y2, float z2) {
-  for (int i = 0; i < LEDS_PER_EDGE; i++) {
-    float t = (float)i / (LEDS_PER_EDGE - 1);
-    voxels[offset+i].x = x1 + (x2-x1)*t;
-    voxels[offset+i].y = y1 + (y2-y1)*t;
-    voxels[offset+i].z = z1 + (z2-z1)*t;
-  }
-}
-
-void buildCubeGeometry() {
-  float A[3]={0,0,0}, B[3]={1,0,0}, C[3]={1,1,0}, D[3]={0,1,0};
-  float E[3]={0,0,1}, F[3]={1,0,1}, G[3]={1,1,1}, H[3]={0,1,1};
-  int e = 0;
-  mapEdge(e++*LEDS_PER_EDGE, A[0],A[1],A[2], B[0],B[1],B[2]);
-  mapEdge(e++*LEDS_PER_EDGE, B[0],B[1],B[2], F[0],F[1],F[2]);
-  mapEdge(e++*LEDS_PER_EDGE, B[0],B[1],B[2], C[0],C[1],C[2]);
-  mapEdge(e++*LEDS_PER_EDGE, C[0],C[1],C[2], G[0],G[1],G[2]);
-  mapEdge(e++*LEDS_PER_EDGE, C[0],C[1],C[2], D[0],D[1],D[2]);
-  mapEdge(e++*LEDS_PER_EDGE, D[0],D[1],D[2], H[0],H[1],H[2]);
-  mapEdge(e++*LEDS_PER_EDGE, D[0],D[1],D[2], A[0],A[1],A[2]);
-  mapEdge(e++*LEDS_PER_EDGE, A[0],A[1],A[2], E[0],E[1],E[2]);
-  mapEdge(e++*LEDS_PER_EDGE, E[0],E[1],E[2], F[0],F[1],F[2]);
-  mapEdge(e++*LEDS_PER_EDGE, F[0],F[1],F[2], G[0],G[1],G[2]);
-  mapEdge(e++*LEDS_PER_EDGE, G[0],G[1],G[2], H[0],H[1],H[2]);
-  mapEdge(e++*LEDS_PER_EDGE, H[0],H[1],H[2], E[0],E[1],E[2]);
-}
-
-////////////////////////////////////////////////////////////
 // ================= FFT PROCESSING =================
 ////////////////////////////////////////////////////////////
 
@@ -244,107 +186,9 @@ void updateFFTRaw() {
     for (int i = 0; i < FFT_BINS; i++) fftBins[i] = fft1024.read(i);
 }
 
-void updateFFTFeatures() {
-  float low=0, mids=0, highs=0, speechBand=0, total=0;
-  for (int i=1;  i<=5;  i++) low        += fftBins[i];
-  for (int i=8;  i<=25; i++) mids       += fftBins[i];
-  for (int i=60; i<=120; i++) highs      += fftBins[i];
-  for (int i=6;  i<=40; i++) speechBand += fftBins[i];
-  for (int i=2;  i<=80; i++) total      += fftBins[i];
-
-  low   *= fftGain * bassGain;
-  mids  *= fftGain * midGain;
-  highs *= fftGain * highGain;
-  total *= fftGain * voiceGain;
-
-  bass         = bass         * smoothingFactor + low        * (1.0f - smoothingFactor);
-  mid          = mid          * smoothingFactor + mids       * (1.0f - smoothingFactor);
-  high         = high         * smoothingFactor + highs      * (1.0f - smoothingFactor);
-  voiceLevel   = voiceLevel   * smoothingFactor + total      * (1.0f - smoothingFactor);
-  speechEnergy = speechEnergy * smoothingFactor + speechBand * (1.0f - smoothingFactor);
-  sparkle      = sparkle      * smoothingFactor + highs      * (1.0f - smoothingFactor);
-
-  if (bass         < 0.005f) bass         = 0;
-  if (mid          < 0.005f) mid          = 0;
-  if (high         < 0.005f) high         = 0;
-  if (voiceLevel   < 0.008f) voiceLevel   = 0;
-  if (speechEnergy < 0.008f) speechEnergy = 0;
-  if (sparkle      < 0.005f) sparkle      = 0;
-}
-
-////////////////////////////////////////////////////////////
-// ================= AUTO CALIBRATION =================
-////////////////////////////////////////////////////////////
-
-#define CAL_ATTACK    0.001f
-#define CAL_DECAY     0.0003f
-#define CAL_TARGET    0.4f
-#define CAL_MIN_GAIN  0.2f
-#define CAL_MAX_GAIN  12.0f
-#define CAL_WARMUP_MS 3000
-
-static float calBassGain  = 1.0f;
-static float calMidGain   = 1.0f;
-static float calHighGain  = 1.0f;
-static float calVoiceGain = 1.0f;
-static float peakBass     = 0;
-static float peakMid      = 0;
-static float peakHigh     = 0;
-static float peakVoice    = 0;
-bool autoCalEnabled = false;
-
-void updateAutoCalibration() {
-  if (!autoCalEnabled) return;
-  if (millis() < CAL_WARMUP_MS) return;
-  float pkAttack = 0.15f, pkDecay = 0.003f;
-  peakBass  = bass       > peakBass  ? bass       * pkAttack + peakBass  * (1-pkAttack) : peakBass  * (1-pkDecay);
-  peakMid   = mid        > peakMid   ? mid        * pkAttack + peakMid   * (1-pkAttack) : peakMid   * (1-pkDecay);
-  peakHigh  = high       > peakHigh  ? high       * pkAttack + peakHigh  * (1-pkAttack) : peakHigh  * (1-pkDecay);
-  peakVoice = voiceLevel > peakVoice ? voiceLevel * pkAttack + peakVoice * (1-pkAttack) : peakVoice * (1-pkDecay);
-  if (peakBass  > 0.001f) { float e=CAL_TARGET/peakBass;  if(e<1)calBassGain -=CAL_ATTACK; else calBassGain +=CAL_DECAY; calBassGain =constrain(calBassGain, CAL_MIN_GAIN,CAL_MAX_GAIN); }
-  if (peakMid   > 0.001f) { float e=CAL_TARGET/peakMid;   if(e<1)calMidGain  -=CAL_ATTACK; else calMidGain  +=CAL_DECAY; calMidGain  =constrain(calMidGain,  CAL_MIN_GAIN,CAL_MAX_GAIN); }
-  if (peakHigh  > 0.001f) { float e=CAL_TARGET/peakHigh;  if(e<1)calHighGain -=CAL_ATTACK; else calHighGain +=CAL_DECAY; calHighGain =constrain(calHighGain, CAL_MIN_GAIN,CAL_MAX_GAIN); }
-  if (peakVoice > 0.001f) { float e=CAL_TARGET/peakVoice; if(e<1)calVoiceGain-=CAL_ATTACK; else calVoiceGain+=CAL_DECAY; calVoiceGain=constrain(calVoiceGain,CAL_MIN_GAIN,CAL_MAX_GAIN); }
-  bass *= calBassGain; mid *= calMidGain; high *= calHighGain;
-  voiceLevel *= calVoiceGain; speechEnergy *= calVoiceGain; sparkle *= calHighGain;
-}
-
-void printCalStatus() {
-  Serial.println(F("\n--- Auto calibration status ---"));
-  Serial.print(F("Enabled : ")); Serial.println(autoCalEnabled ? F("YES") : F("NO"));
-  Serial.print(F("Bass  gain: ")); Serial.print(calBassGain,3);  Serial.print(F("  peak: ")); Serial.println(peakBass,3);
-  Serial.print(F("Mid   gain: ")); Serial.print(calMidGain,3);   Serial.print(F("  peak: ")); Serial.println(peakMid,3);
-  Serial.print(F("High  gain: ")); Serial.print(calHighGain,3);  Serial.print(F("  peak: ")); Serial.println(peakHigh,3);
-  Serial.print(F("Voice gain: ")); Serial.print(calVoiceGain,3); Serial.print(F("  peak: ")); Serial.println(peakVoice,3);
-}
-
-void resetCalibration() {
-  calBassGain = calMidGain = calHighGain = calVoiceGain = 1.0f;
-  peakBass = peakMid = peakHigh = peakVoice = 0;
-  Serial.println(F("Calibration reset."));
-}
-
-////////////////////////////////////////////////////////////
-// ================= SYLLABLE DETECTOR =================
-////////////////////////////////////////////////////////////
-
-void updateSyllableDetector() {
-  sylAvg = sylAvg * 0.982f + speechEnergy * 0.018f;
-  syllableOnset = false;
-  if (speechEnergy > sylAvg * 1.6f && speechEnergy > 0.015f && speechEnergy > sylLastEnergy * 1.2f) {
-    syllableOnset = true;
-    sylEnv        = 1.0f;
-  }
-  sylLastEnergy = speechEnergy;
-  sylEnv       *= 0.91f;
-}
-
 void updateAudio() {
-    updateFFTRaw();
-    updateFFTFeatures();
-    updateAutoCalibration();
-    updateSyllableDetector();
-    updateBeatDetector();
+    updateFFTRaw();          // fill fftBins[] from the FFT
+    audioEngineUpdate();     // bands + room AGC + beat/tempo → AudioBus `audio`
 }
 
 ////////////////////////////////////////////////////////////
@@ -357,21 +201,8 @@ void startTransition(AnimFunc target) {
   fill_solid(bufferB, NUM_LEDS, CRGB::Black);
 }
 
-void applyAnimGains(int idx) {
-  bass  *= audioAnimGains[idx].bass;
-  mid   *= audioAnimGains[idx].mid;
-  high  *= audioAnimGains[idx].high;
-}
-
-void restoreAnimGains(int idx) {
-  if (audioAnimGains[idx].bass  > 0) bass  /= audioAnimGains[idx].bass;
-  if (audioAnimGains[idx].mid   > 0) mid   /= audioAnimGains[idx].mid;
-  if (audioAnimGains[idx].high  > 0) high  /= audioAnimGains[idx].high;
-}
-
 void renderFrame(float t) {
   fill_solid(leds, NUM_LEDS, CRGB::Black);
-  if (currentMode == AUDIO_MODE) applyAnimGains(audioIndex);
   if (!transitioning) {
     currentAnim(leds, t);
   } else {
@@ -388,7 +219,6 @@ void renderFrame(float t) {
         leds[i] = blend(bufferA[i], bufferB[i], ba);
     }
   }
-  if (currentMode == AUDIO_MODE) restoreAnimGains(audioIndex);
 }
 
 ////////////////////////////////////////////////////////////
@@ -419,49 +249,25 @@ const char* modeNames[4] = { "STATIC", "AUDIO", "VOICE", "ARTNET" };
 // ================= MENU SYSTEM =================
 ////////////////////////////////////////////////////////////
 
-enum MenuState { TOP_NAV, TOP_EDIT, FFT_NAV, FFT_EDIT, TRIM_NAV, TRIM_EDIT };
+enum MenuState { TOP_NAV, TOP_EDIT, FFT_NAV, FFT_EDIT };
 enum TopRow { TOP_MODE, TOP_ANIM, TOP_PALETTE, TOP_BRIGHT, TOP_FFT, TOP_ROW_COUNT };
 
-#define FFT_ROW_NEXT  5
-#define FFT_ROW_BACK  6
-#define FFT_ROW_COUNT_AUDIO  7   // with Next
-#define FFT_ROW_COUNT_OTHER  6   // without Next (Back moves to row 5)
-
-#define TRIM_ROW_BACK  3
-#define TRIM_ROW_COUNT 4
-
-int trimRow = 0;
-
-int fftRowCount() {
-  return (currentMode == AUDIO_MODE) ? FFT_ROW_COUNT_AUDIO : FFT_ROW_COUNT_OTHER;
-}
-
-float& trimParamRef(int row) {
-  switch (row) {
-    case 0: return audioAnimGains[audioIndex].bass;
-    case 1: return audioAnimGains[audioIndex].mid;
-    case 2: return audioAnimGains[audioIndex].high;
-    default: return audioAnimGains[audioIndex].bass;
-  }
-}
-
-const char* trimRowNames[3] = { "Bass", "Mid ", "High" };
-
+// Audio submenu: 3 global knobs + Back
+#define AUDIO_ROW_COUNT 4
+#define AUDIO_ROW_BACK  3
 
 MenuState menuState = TOP_NAV;
 TopRow    topRow    = TOP_MODE;
 int       fftRow    = 0;
 
-const char* fftParamNames[5] = { "Gain","Bass","Mid","High","Voice" };
+const char* audioParamNames[3] = { "React", "BeatSns", "Tilt" };
 
-float& fftParamRef(int row) {
+float& audioKnobRef(int row) {
   switch (row) {
-    case 0: return fftGain;
-    case 1: return bassGain;
-    case 2: return midGain;
-    case 3: return highGain;
-    case 4: return voiceGain;
-    default: return fftGain;
+    case 0: return reactivity;
+    case 1: return beatSensitivity;
+    case 2: return bandTilt;
+    default: return reactivity;
   }
 }
 
@@ -520,63 +326,31 @@ void updateOLED() {
     display.print(currentBrightness);
     display.drawFastHLine(0, 52, 128, SSD1306_WHITE);
 
-    // Row 4 — FFT Menu  (y=55, no hline)
+    // Row 4 — Audio Menu  (y=55, no hline)
     if (topRow == TOP_FFT)
       display.fillTriangle(1,55,1,62,7,58, SSD1306_WHITE);
     display.setCursor(13, 55);
-    display.print(F("FFT Menu >"));
-  
-  // ── FFT page ──────────────────────────────────────────
-  } else if (menuState == FFT_NAV || menuState == FFT_EDIT) {
+    display.print(F("Audio >"));
+
+  // ── Audio knobs page ──────────────────────────────────
+  } else {   // FFT_NAV || FFT_EDIT
 
     display.setCursor(0, 0);
-    display.print(F("-- FFT Settings --"));
+    display.print(F("-- Audio Reactivity --"));
     display.drawFastHLine(0, 10, 128, SSD1306_WHITE);
 
-    const int rowH = 8;
-    int rows = fftRowCount();
-    for (int r = 0; r < rows; r++) {
-      int y = 13 + r * rowH;
+    const int rowH = 10;
+    for (int r = 0; r < AUDIO_ROW_COUNT; r++) {
+      int y = 15 + r * rowH;
       if (fftRow == r)
         display.fillTriangle(1, y, 1, y+7, 7, y+3, SSD1306_WHITE);
       display.setCursor(13, y);
-      if (r < 5) {
-        display.print(fftParamNames[r]);
-        display.print(F(": "));
-        display.print(fftParamRef(r), 2);
-        if (menuState == FFT_EDIT && fftRow == r) {
-          display.setCursor(110, y); display.print(F("<"));
-        }
-      } else if (r == FFT_ROW_NEXT && currentMode == AUDIO_MODE) {
-        display.print(F("Anim Trim >"));
-      } else {
-        display.print(F("[ Back ]"));
-      }
-    }
-
-  // ── Trim page ─────────────────────────────────────────
-  } else {
-
-    display.setCursor(0, 0);
-    display.print(F("-- Anim Trim --"));
-    display.drawFastHLine(0, 10, 128, SSD1306_WHITE);
-
-    // Show animation name as subheader
-    display.setCursor(13, 11);
-    display.print(animName);
-
-    const int rowH = 8;
-    for (int r = 0; r < TRIM_ROW_COUNT; r++) {
-      int y = 21 + r * rowH;
-      if (trimRow == r)
-        display.fillTriangle(1, y, 1, y+7, 7, y+3, SSD1306_WHITE);
-      display.setCursor(13, y);
       if (r < 3) {
-        display.print(trimRowNames[r]);
+        display.print(audioParamNames[r]);
         display.print(F(": "));
-        display.print(trimParamRef(r), 2);
-        if (menuState == TRIM_EDIT && trimRow == r) {
-          display.setCursor(110, y); display.print(F("<"));
+        display.print(audioKnobRef(r), 2);
+        if (menuState == FFT_EDIT && fftRow == r) {
+          display.setCursor(116, y); display.print(F("<"));
         }
       } else {
         display.print(F("[ Back ]"));
@@ -585,11 +359,6 @@ void updateOLED() {
   }
 
   display.display();
-}
-
-void clampFftRow() {
-  int maxRow = fftRowCount() - 1;
-  if (fftRow > maxRow) fftRow = maxRow;
 }
 
 void handleEncoder() {
@@ -610,14 +379,13 @@ void handleEncoder() {
           else if (currentMode == AUDIO_MODE)  startTransition(audioAnims[audioIndex]);
           else if (currentMode == VOICE_MODE)  startTransition(voiceAnims[voiceIndex]);
           else                                 fill_solid(leds, NUM_LEDS, CRGB::Black);
-          clampFftRow();
           saveSettings(); printModeStatus();
         }
       } else if (topRow == TOP_ANIM) {
-        if      (currentMode == STATIC_MODE) { staticIndex = ((staticIndex + steps) % 10 + 10) % 10; startTransition(staticAnims[staticIndex]); }
-        else if (currentMode == AUDIO_MODE)  { audioIndex  = ((audioIndex  + steps) % 10 + 10) % 10; startTransition(audioAnims[audioIndex]);  }
-        else                                 { voiceIndex  = ((voiceIndex  + steps) % 10 + 10) % 10; startTransition(voiceAnims[voiceIndex]);  }
-        saveSettings(); printModeStatus();
+        int cnt = animCount(currentMode);
+        if      (currentMode == STATIC_MODE) { staticIndex = ((staticIndex + steps) % cnt + cnt) % cnt; startTransition(staticAnims[staticIndex]); saveSettings(); printModeStatus(); }
+        else if (currentMode == AUDIO_MODE)  { audioIndex  = ((audioIndex  + steps) % cnt + cnt) % cnt; startTransition(audioAnims[audioIndex]);  saveSettings(); printModeStatus(); }
+        else if (currentMode == VOICE_MODE)  { voiceIndex  = ((voiceIndex  + steps) % cnt + cnt) % cnt; startTransition(voiceAnims[voiceIndex]);  saveSettings(); printModeStatus(); }
       } else if (topRow == TOP_PALETTE) {
         uint8_t newIdx = ((int)(currentPaletteIndex + steps) % (int)NUM_PALETTES + NUM_PALETTES) % NUM_PALETTES;
         startPaletteFade(newIdx);
@@ -630,20 +398,15 @@ void handleEncoder() {
       break;
 
     case FFT_NAV:
-      fftRow = ((fftRow + steps) % fftRowCount() + fftRowCount()) % fftRowCount();
+      fftRow = ((fftRow + steps) % AUDIO_ROW_COUNT + AUDIO_ROW_COUNT) % AUDIO_ROW_COUNT;
       break;
 
-    case FFT_EDIT:
-      fftParamRef(fftRow) = constrain(fftParamRef(fftRow) + steps * 0.05f, 0.1f, 10.0f);
+    case FFT_EDIT: {
+      float d = steps * 0.05f;
+      if (fftRow == 2) audioKnobRef(2)      = constrain(audioKnobRef(2) + d, -1.0f, 1.0f);   // Band Tilt
+      else             audioKnobRef(fftRow) = constrain(audioKnobRef(fftRow) + d, 0.1f, 3.0f);
       break;
-
-    case TRIM_NAV:
-      trimRow = ((trimRow + steps) % TRIM_ROW_COUNT + TRIM_ROW_COUNT) % TRIM_ROW_COUNT;
-      break;
-
-    case TRIM_EDIT:
-      trimParamRef(trimRow) = constrain(trimParamRef(trimRow) + steps * 0.05f, 0.1f, 3.0f);
-      break;
+    }
   }
 
   updateOLED();
@@ -669,29 +432,12 @@ void handleEncoderButton() {
       break;
 
     case FFT_NAV:
-      if (currentMode == AUDIO_MODE && fftRow == FFT_ROW_NEXT) {
-        menuState = TRIM_NAV; trimRow = 0;
-      } else if (fftRow == fftRowCount() - 1) {
-        menuState = TOP_NAV; topRow = TOP_FFT;
-      } else {
-        menuState = FFT_EDIT;
-      }
+      if (fftRow == AUDIO_ROW_BACK) { menuState = TOP_NAV; topRow = TOP_FFT; }
+      else                          { menuState = FFT_EDIT; }
       break;
 
     case FFT_EDIT:
       saveSettings(); menuState = FFT_NAV;
-      break;
-
-    case TRIM_NAV:
-      if (trimRow == TRIM_ROW_BACK) {
-        menuState = FFT_NAV; fftRow = FFT_ROW_NEXT;
-      } else {
-        menuState = TRIM_EDIT;
-      }
-      break;
-
-    case TRIM_EDIT:
-      saveSettings(); menuState = TRIM_NAV;
       break;
   }
 
@@ -742,35 +488,16 @@ String serialBuffer;
 void printHelp() {
   Serial.println(F("\nEncoder: turn=scroll rows  press=enter/exit"));
   Serial.println(F("\nSerial commands:"));
-  Serial.println(F("gain <v>  bass <v>  mid <v>  high <v>  voice <v>  smooth <v>"));
-  Serial.println(F("status  save  help  mode"));
-  Serial.println(F("fftdebug on/off  cal on/off/reset/cal"));
-  Serial.println(F("demo — toggle demo mode\n"));
-  Serial.println(F("beat — print beat detector status"));
+  Serial.println(F("react <v>  beatsens <v>  tilt <v>   (audio knobs)"));
+  Serial.println(F("status  save  help  mode  demo"));
+  Serial.println(F("audio  — toggle live band/beat monitor"));
 }
 
 void printStatus() {
-  Serial.println(F("\nFFT Settings:"));
-  Serial.print(F("Gain: "));       Serial.println(fftGain);
-  Serial.print(F("Bass Gain: "));  Serial.println(bassGain);
-  Serial.print(F("Mid Gain: "));   Serial.println(midGain);
-  Serial.print(F("High Gain: "));  Serial.println(highGain);
-  Serial.print(F("Voice Gain: ")); Serial.println(voiceGain);
-  Serial.print(F("Smoothing: "));  Serial.println(smoothingFactor);
-}
-
-void printFFTDebug() {
-  if (!fftDebugEnabled) return;
-  if (millis()-lastDebugPrint<DEBUG_INTERVAL_MS) return;
-  lastDebugPrint=millis();
-  Serial.println(F("\n--- FFT debug ---"));
-  Serial.print(F("BASS  2-5 : ")); for(int i=2;i<=5;i++){Serial.print(20.0f*log10f(fftBins[i]+1e-6f),1);Serial.print(F("dB "));} Serial.println();
-  Serial.print(F("MID   6-20: ")); for(int i=6;i<=20;i+=2){Serial.print(20.0f*log10f(fftBins[i]+1e-6f),1);Serial.print(F("dB "));} Serial.println();
-  Serial.print(F("HIGH 21-80: ")); for(int i=21;i<=80;i+=10){Serial.print(20.0f*log10f(fftBins[i]+1e-6f),1);Serial.print(F("dB "));} Serial.println();
-  Serial.print(F("bass=")); Serial.print(bass,3); Serial.print(F(" mid=")); Serial.print(mid,3);
-  Serial.print(F(" high=")); Serial.print(high,3); Serial.print(F(" voice=")); Serial.print(voiceLevel,3);
-  Serial.print(F(" speech=")); Serial.print(speechEnergy,3); Serial.print(F(" sparkle=")); Serial.println(sparkle,3);
-  Serial.print(F("BASS bar: [")); int bars=constrain((int)(bass*40),0,40); for(int i=0;i<40;i++) Serial.print(i<bars?'|':' '); Serial.println(F("]"));
+  Serial.println(F("\nAudio knobs:"));
+  Serial.print(F("Reactivity : ")); Serial.println(reactivity, 2);
+  Serial.print(F("Beat Sens  : ")); Serial.println(beatSensitivity, 2);
+  Serial.print(F("Band Tilt  : ")); Serial.println(bandTilt, 2);
 }
 
 ////////////////////////////////////////////////////////////
@@ -781,8 +508,8 @@ unsigned long demoLastChange = 0;
 #define DEMO_INTERVAL_MS 30000
 
 const int demoList[][2] = {
-  {STATIC_MODE,0},{STATIC_MODE,1},{STATIC_MODE,2},{STATIC_MODE,3},{STATIC_MODE,4},
-  {STATIC_MODE,5},{STATIC_MODE,6},{STATIC_MODE,7},{STATIC_MODE,8},{STATIC_MODE,9},
+  {STATIC_MODE,0},{STATIC_MODE,1},{STATIC_MODE,2},{STATIC_MODE,3},
+  {STATIC_MODE,4},{STATIC_MODE,5},{STATIC_MODE,6},{STATIC_MODE,7},
   {AUDIO_MODE,0},{AUDIO_MODE,1},{AUDIO_MODE,2},{AUDIO_MODE,3},{AUDIO_MODE,4},
   {AUDIO_MODE,5},{AUDIO_MODE,6},{AUDIO_MODE,7},{AUDIO_MODE,8},{AUDIO_MODE,9},
   {VOICE_MODE,0},{VOICE_MODE,1},{VOICE_MODE,2},{VOICE_MODE,3},
@@ -817,27 +544,15 @@ void handleSerial() {
     char c = Serial.read();
     if (c=='\n'||c=='\r') {
       serialBuffer.trim();
-      if      (serialBuffer.startsWith("gain "))   fftGain         = serialBuffer.substring(5).toFloat();
-      else if (serialBuffer.startsWith("bass "))   bassGain        = serialBuffer.substring(5).toFloat();
-      else if (serialBuffer.startsWith("mid "))    midGain         = serialBuffer.substring(4).toFloat();
-      else if (serialBuffer.startsWith("high "))   highGain        = serialBuffer.substring(5).toFloat();
-      else if (serialBuffer.startsWith("voice "))  voiceGain       = serialBuffer.substring(6).toFloat();
-      else if (serialBuffer.startsWith("smooth ")) smoothingFactor = serialBuffer.substring(7).toFloat();
+      if      (serialBuffer.startsWith("react "))    reactivity      = constrain(serialBuffer.substring(6).toFloat(), 0.1f, 3.0f);
+      else if (serialBuffer.startsWith("beatsens ")) beatSensitivity = constrain(serialBuffer.substring(9).toFloat(), 0.1f, 3.0f);
+      else if (serialBuffer.startsWith("tilt "))     bandTilt        = constrain(serialBuffer.substring(5).toFloat(), -1.0f, 1.0f);
       else if (serialBuffer=="status")             printStatus();
       else if (serialBuffer=="mode")               printModeStatus();
       else if (serialBuffer=="save")             { saveSettings(); Serial.println(F("Saved.")); }
       else if (serialBuffer=="help")               printHelp();
-      else if (serialBuffer=="fftdebug on")      { fftDebugEnabled=true;  Serial.println(F("FFT debug ON"));  }
-      else if (serialBuffer=="fftdebug off")     { fftDebugEnabled=false; Serial.println(F("FFT debug OFF")); }
-      else if (serialBuffer=="cal on")           { autoCalEnabled=true;   Serial.println(F("Auto cal ON"));   }
-      else if (serialBuffer=="cal off")          { autoCalEnabled=false;  Serial.println(F("Auto cal OFF"));  }
-      else if (serialBuffer=="cal reset")          resetCalibration();
-      else if (serialBuffer=="cal")                printCalStatus();
       else if (serialBuffer=="demo")               toggleDemo();
-      //else if (serialBuffer == "artnet") artnetPrintStatus();
-      else if (serialBuffer == "beat") printBeatStatus();
-      else if (serialBuffer == "beatdebug on")  { beatDebugEnabled = true;  Serial.println(F("Beat debug ON"));  }
-      else if (serialBuffer == "beatdebug off") { beatDebugEnabled = false; Serial.println(F("Beat debug OFF")); }
+      else if (serialBuffer=="audio")            { audioMonitorEnabled = !audioMonitorEnabled; Serial.println(audioMonitorEnabled ? F("Audio monitor ON") : F("Audio monitor OFF")); }
       else Serial.println(F("Unknown command. Type 'help'."));
       serialBuffer = "";
     } else serialBuffer += c;
@@ -857,24 +572,24 @@ void setup() {
   staticAnims[0] = staticDiagonalFlow;
   staticAnims[1] = staticLissajous;
   staticAnims[2] = staticGravityParticles;
-  staticAnims[3] = staticSparkle;
-  staticAnims[4] = staticReactionDiffusion;
-  staticAnims[5] = staticMobiusBraid;
-  staticAnims[6] = staticEdgeBreathe;
-  staticAnims[7] = staticPlasmaCube;
-  staticAnims[8] = staticZipper;
-  staticAnims[9] = staticNoiseWorms;
+  staticAnims[3] = staticReactionDiffusion;
+  staticAnims[4] = staticMobiusBraid;
+  staticAnims[5] = staticPlasmaCube;
+  staticAnims[6] = staticNoiseWorms;      // rebuilt: 3D-noise, flows across corners
+  staticAnims[7] = staticCoral;           // 2nd reaction-diffusion (coral/maze regime)
+  staticAnims[8] = placeholderAnim;       // free slot
+  staticAnims[9] = placeholderAnim;       // free slot
 
   audioAnims[0] = audioTriAxis;
   audioAnims[1] = audioImpact;
   audioAnims[2] = audioCell;
-  audioAnims[3] = audioFreqBands;
-  audioAnims[4] = audioBassBloom;
-  audioAnims[5] = audioVortex;
-  audioAnims[6] = audioResonanceNodes;
-  audioAnims[7] = audioPulseWeb;
-  audioAnims[8] = audioSpectrumHelix;
-  audioAnims[9] = audioEarthquake;
+  audioAnims[3] = audioBassBloom;
+  audioAnims[4] = audioVortex;
+  audioAnims[5] = audioPulseWeb;
+  audioAnims[6] = audioSpectrumHelix;
+  audioAnims[7] = audioEarthquake;
+  audioAnims[8] = audioFlame;        // graph heat-diffusion (fire crawls the wireframe)
+  audioAnims[9] = audioDendrite;     // graph lightning (charges walk + fork at corners)
 
   voiceAnims[0] = voiceBreathe;
   voiceAnims[1] = voiceFormant;
@@ -911,8 +626,7 @@ void loop() {
   float t = millis() * 0.001f;
   demoUpdate();
   updateAudio();
-  printFFTDebug();
-  printBeatDebug();
+  printAudioMonitor();
   handleSerial();
   handleEncoder();
   handleEncoderButton();

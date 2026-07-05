@@ -230,16 +230,7 @@ void staticGravityParticles(CRGB* buf, float t) {
     }
 }
 
-// Static3: Sparkle
-void staticSparkle(CRGB* buf, float t) {
-  for (int i=0;i<NUM_LEDS;i++) {
-    float phase=(float)((i*2731+1013)%997)/997.0f;
-    float rate=2.5f+(float)((i*1637)%100)/100.0f*4.0f;
-    float cycle=fmodf(t*rate+phase*6.2832f,6.2832f);
-    float v=0; if(cycle<0.35f){v=1.0f-(cycle/0.35f);v=v*v*v;}
-    buf[i]=applyPalette(v);
-  }
-}
+// (Static3 Sparkle cut — random per-index twinkle had no cube structure.)
 
 // Static4: Reaction Diffusion
 #define RD_DA    0.2f
@@ -282,35 +273,7 @@ void rdNudgeIfDead() {
   }
 }
 
-void buildRDNeighbors() {
-  const int EF[12] = {0,1,1,2,2,3,3,0,4,5,6,7};
-  const int ET[12] = {1,5,2,6,3,7,0,4,5,6,7,4};
-  for (int e = 0; e < NUM_EDGES; e++) {
-    int base = e * LEDS_PER_EDGE, last = base + LEDS_PER_EDGE - 1;
-    for (int i = base; i <= last; i++) {
-      rdNeighborL[i] = (i > base) ? i - 1 : last;
-      rdNeighborR[i] = (i < last) ? i + 1 : base;
-    }
-  }
-  struct EndpointRef { int led; int edge; };
-  for (int v = 0; v < 8; v++) {
-    EndpointRef eps[6]; int n = 0;
-    for (int e = 0; e < NUM_EDGES; e++) {
-      int base = e * LEDS_PER_EDGE, tip = base + LEDS_PER_EDGE - 1;
-      if (EF[e] == v) { eps[n++] = { base, e }; }
-      if (ET[e] == v) { eps[n++] = { tip,  e }; }
-    }
-    if (n < 2) continue;
-    for (int a = 0; a < n; a++) {
-      int b = (a + 1) % n;
-      int ledA = eps[a].led, ledB = eps[b].led;
-      int baseA = eps[a].edge * LEDS_PER_EDGE; bool aIsBase = (ledA == baseA);
-      int baseB = eps[b].edge * LEDS_PER_EDGE; bool bIsBase = (ledB == baseB);
-      if (aIsBase) rdNeighborL[ledA] = ledB; else rdNeighborR[ledA] = ledB;
-      if (bIsBase) rdNeighborL[ledB] = ledA; else rdNeighborR[ledB] = ledA;
-    }
-  }
-}
+// buildRDNeighbors() now lives in cube.h (the shared edge graph).
 
 void rdStepAll() {
   for (int i = 0; i < NUM_LEDS; i++) {
@@ -331,6 +294,57 @@ void staticReactionDiffusion(CRGB* buf, float t) {
   rdNudgeIfDead();
   for (int s=0;s<RD_STEPS;s++) rdStepAll();
   for (int i=0;i<NUM_LEDS;i++) buf[i]=applyPalette(constrain(rdB[i]*3.5f,0.0f,1.0f));
+}
+
+// Static: Coral — a second reaction-diffusion in a coral/maze
+// regime (different feed/kill from RD). Same welded-graph
+// diffusion, but grows branching labyrinth textures instead of
+// travelling spots. Has its own chemical fields so it can run
+// alongside RD (e.g. during a crossfade) without interfering.
+#define CORAL_DA    0.2f
+#define CORAL_DB    0.08f
+#define CORAL_FEED  0.0545f
+#define CORAL_KILL  0.0620f
+#define CORAL_DT    0.25f
+#define CORAL_STEPS 6
+static float coralA[NUM_LEDS], coralB[NUM_LEDS];
+static float coralA2[NUM_LEDS], coralB2[NUM_LEDS];
+static bool  coralReady = false;
+
+void coralSeed() {
+  for (int i=0;i<NUM_LEDS;i++) { coralA[i]=1.0f; coralB[i]=0.0f; }
+  for (int e=0;e<NUM_EDGES;e++) {
+    int base=e*LEDS_PER_EDGE, last=base+LEDS_PER_EDGE-1;
+    int seeds=2+random(3);
+    for (int s=0;s<seeds;s++) {
+      int cx=base+random(3,LEDS_PER_EDGE-3);
+      for (int d=-3;d<=3;d++) { int idx=constrain(cx+d,base,last); coralA[idx]=0.3f; coralB[idx]=0.4f; }
+    }
+  }
+}
+
+void staticCoral(CRGB* buf, float t) {
+  if (!coralReady) { coralSeed(); coralReady=true; }
+  // reseed watchdog — keep the reaction perpetually alive
+  static unsigned long lastSeed=0; unsigned long now=millis();
+  if (now-lastSeed>3000) {
+    lastSeed=now; float tot=0; for (int i=0;i<NUM_LEDS;i++) tot+=coralB[i];
+    if (tot<1.5f) coralSeed();
+  }
+  for (int s=0;s<CORAL_STEPS;s++) {
+    for (int i=0;i<NUM_LEDS;i++) {
+      float a=coralA[i], b=coralB[i];
+      int L=rdNeighborL[i], R=rdNeighborR[i];
+      float lapA=coralA[L]+coralA[R]-2.0f*a;
+      float lapB=coralB[L]+coralB[R]-2.0f*b;
+      float rxn=a*b*b;
+      coralA2[i]=constrain(a+CORAL_DT*(CORAL_DA*lapA-rxn+CORAL_FEED*(1.0f-a)),0.0f,1.0f);
+      coralB2[i]=constrain(b+CORAL_DT*(CORAL_DB*lapB+rxn-(CORAL_KILL+CORAL_FEED)*b),0.0f,1.0f);
+    }
+    memcpy(coralA,coralA2,sizeof(float)*NUM_LEDS);
+    memcpy(coralB,coralB2,sizeof(float)*NUM_LEDS);
+  }
+  for (int i=0;i<NUM_LEDS;i++) buf[i]=applyPalette(constrain(coralB[i]*3.5f,0.0f,1.0f));
 }
 
 // Static5: Mobius Bend
@@ -373,20 +387,7 @@ void staticMobiusBraid(CRGB* buf, float t) {
     }
 }
 
-// Static6: Edge Breathe
-void staticEdgeBreathe(CRGB* buf, float t) {
-  for (int e = 0; e < NUM_EDGES; e++) {
-    float phase  = (float)e / NUM_EDGES * 6.2832f;
-    float bright = (sinf(t * 0.7f + phase) + 1.0f) * 0.5f;
-    bright = bright * bright;
-    int base = e * LEDS_PER_EDGE;
-    for (int j = 0; j < LEDS_PER_EDGE; j++) {
-      float edgePos = (float)j / (LEDS_PER_EDGE - 1);
-      float tip = expf(-fabsf(edgePos - 0.5f) * 6.0f);
-      buf[base + j] = applyPalette(bright * (0.3f + tip * 0.7f));
-    }
-  }
-}
+// (Static6 EdgeBreathe cut — pulsed edges in wiring order, not spatial order.)
 
 // Static7: Plasma Cube
 void staticPlasmaCube(CRGB* buf, float t) {
@@ -401,40 +402,19 @@ void staticPlasmaCube(CRGB* buf, float t) {
   }
 }
 
-// Static8: Zipper
-void staticZipper(CRGB* buf, float t) {
-  fill_solid(buf, NUM_LEDS, CRGB::Black);
-  const int pairs[6][2] = { {0,9},{1,11},{2,7},{3,6},{4,10},{5,8} };
-  const float period=4.0f, seam=0.04f;
-  for (int p=0;p<6;p++) {
-    float phase  = (float)p/6.0f;
-    float cursor = fmodf(t/period+phase, 1.0f);
-    for (int side=0;side<2;side++) {
-      int base=pairs[p][side]*LEDS_PER_EDGE;
-      for (int j=0;j<LEDS_PER_EDGE;j++) {
-        float lp=(float)j/(LEDS_PER_EDGE-1);
-        float dist=fabsf(lp-cursor);
-        float v=expf(-dist*dist/(seam*seam));
-        float fill=(lp<cursor)?0.15f:0.0f;
-        CRGB c=applyPalette(constrain(v+fill,0.0f,1.0f));
-        buf[base+j].r=qadd8(buf[base+j].r,c.r);
-        buf[base+j].g=qadd8(buf[base+j].g,c.g);
-        buf[base+j].b=qadd8(buf[base+j].b,c.b);
-      }
-    }
-  }
-}
+// (Static8 Zipper cut — edge pairing was a hand-picked index table, not geometry.)
 
-// Static9: Noise Worms
+// Static: Noise Worms — 3D Perlin sampled at each LED's actual
+// position, so worms flow continuously across edges and around
+// corners instead of being 12 independent per-edge strips.
 void staticNoiseWorms(CRGB* buf, float t) {
-  uint32_t ti=(uint32_t)(t*60.0f);
-  for (int e=0;e<NUM_EDGES;e++) {
-    int base=e*LEDS_PER_EDGE;
-    for (int j=0;j<LEDS_PER_EDGE;j++) {
-      uint8_t n=inoise8(e*47+j*11, ti+e*200);
-      float v=(n/255.0f); v=v*v;
-      buf[base+j]=applyPalette(v);
-    }
+  uint32_t ti=(uint32_t)(t*40.0f);
+  for (int i=0;i<NUM_LEDS;i++) {
+    uint8_t n=inoise8((uint16_t)(voxels[i].x*160.0f + ti),
+                      (uint16_t)(voxels[i].y*160.0f + ti/2),
+                      (uint16_t)(voxels[i].z*160.0f));
+    float v=n/255.0f; v=v*v;   // gamma → dark troughs, bright crests
+    buf[i]=applyPalette(v);
   }
 }
 
@@ -451,6 +431,13 @@ static float burstX=0.5f,burstY=0.5f,burstZ=0.5f,burstEnv=0.0f,lastHigh=0.0f;
 
 void audioTriAxis(CRGB* buf, float t) {
     const float inv_sqrt3=0.57735f;
+
+    // audio bus → drivers
+    float bass = audio.sub()*0.6f + audio.bass();
+    float mid  = audio.lowMid()*0.5f + audio.mid() + audio.highMid()*0.5f;
+    float high = audio.presence() + audio.brilliance();
+    bool  beatFired = audio.beatFired; float beatPhase = audio.beatPhase;
+    float tempoConfidence = audio.tempoConfidence;
 
     // Beat-locked burst
     if (beatFired && tempoConfidence > 0.25f) {
@@ -497,6 +484,13 @@ void audioImpact(CRGB* buf, float t) {
         for(int i=0;i<NUM_LEDS;i++) sparkEnvs[i]=0;
         shocksInited=true;
     }
+
+    // audio bus → drivers
+    float bass = audio.sub()*0.6f + audio.bass();
+    float mid  = audio.lowMid()*0.5f + audio.mid() + audio.highMid()*0.5f;
+    float high = audio.presence() + audio.brilliance();
+    bool  beatFired = audio.beatFired;
+    float tempoConfidence = audio.tempoConfidence;
 
     // Spawn on beat when confident, otherwise on bass transient
     bool spawnShock = (beatFired && tempoConfidence > 0.25f && bass > 0.02f) ||
@@ -558,6 +552,14 @@ void audioCell(CRGB* buf, float t) {
         cellInited=true;
     }
 
+    // audio bus → drivers
+    float bass = audio.sub()*0.6f + audio.bass();
+    float mid  = audio.lowMid()*0.5f + audio.mid() + audio.highMid()*0.5f;
+    float high = audio.presence() + audio.brilliance();
+    bool  beatFired = audio.beatFired;
+    float barPhase = audio.barPhase;
+    float tempoConfidence = audio.tempoConfidence;
+
     // Beat-locked seeding — bigger burst on beat
     bool doSeed = (beatFired && tempoConfidence > 0.25f) ||
                   (bass > cellLastBass*1.3f && bass > 0.04f);
@@ -601,31 +603,7 @@ void audioCell(CRGB* buf, float t) {
     for (int i=0;i<NUM_LEDS;i++) buf[i]=applyPalette(cellState[i]);
 }
 
-// ── Audio3: Frequency Bands ───────────────────────────────
-// Beat: brightness envelope rides beatPhase so bands throb
-// in time. On beatFired, flash all bands briefly.
-
-void audioFreqBands(CRGB* buf, float t) {
-    // Beat envelope — sharp attack, exponential decay
-    float beatEnv = (tempoConfidence > 0.25f) ?
-                    (0.7f + 0.3f * expf(-beatPhase * 3.0f)) : 1.0f;
-
-    for (int e=0;e<NUM_EDGES;e++) {
-        int midLed=e*LEDS_PER_EDGE+(LEDS_PER_EDGE/2);
-        if (midLed>=NUM_LEDS) continue;
-        float z=voxels[midLed].z;
-        float level;
-        if      (z<0.25f) level=constrain(bass*3.0f,0.0f,1.0f);
-        else if (z<0.75f) level=constrain(mid*3.0f,0.0f,1.0f);
-        else              level=constrain(high*3.0f,0.0f,1.0f);
-        level*=beatEnv;
-        int base=e*LEDS_PER_EDGE;
-        for (int j=0;j<LEDS_PER_EDGE;j++) {
-            uint8_t n=inoise8((uint16_t)(e*31+j*7),(uint16_t)(t*40.0f));
-            buf[base+j]=applyPalette(level*(0.6f+(n/255.0f)*0.4f));
-        }
-    }
-}
+// (Audio3 FreqBands cut — spectrum-by-height folded into SpectrumHelix.)
 
 // ── Audio4: Bass Bloom ────────────────────────────────────
 // Beat: bloom fires on beatFired. Expansion speed derived
@@ -634,6 +612,14 @@ void audioFreqBands(CRGB* buf, float t) {
 static float bloomRadius=0,bloomEnv=0,bloomLastBass=0;
 
 void audioBassBloom(CRGB* buf, float t) {
+    // audio bus → drivers
+    float bass = audio.sub()*0.6f + audio.bass();
+    float mid  = audio.lowMid()*0.5f + audio.mid() + audio.highMid()*0.5f;
+    float high = audio.presence() + audio.brilliance();
+    bool  beatFired = audio.beatFired;
+    float tempoConfidence = audio.tempoConfidence;
+    float beatPeriodMs = 60000.0f / audio.bpm;
+
     // Fire on beat when confident, otherwise on bass transient
     bool doBloom = (beatFired && tempoConfidence > 0.25f && bass > 0.02f) ||
                    (bass > bloomLastBass*1.3f && bass > 0.04f);
@@ -665,6 +651,14 @@ void audioBassBloom(CRGB* buf, float t) {
 // Arm width pulses on beat for a breathing vortex.
 
 void audioVortex(CRGB* buf, float t) {
+    // audio bus → drivers
+    float bass = audio.sub()*0.6f + audio.bass();
+    float mid  = audio.lowMid()*0.5f + audio.mid() + audio.highMid()*0.5f;
+    float high = audio.presence() + audio.brilliance();
+    float beatPhase = audio.beatPhase;
+    float bpm = audio.bpm;
+    float tempoConfidence = audio.tempoConfidence;
+
     // Lock spin speed to tempo when confident
     float spinBase;
     if (tempoConfidence > 0.5f) {
@@ -692,38 +686,7 @@ void audioVortex(CRGB* buf, float t) {
     }
 }
 
-// ── Audio6: Resonance Nodes ───────────────────────────────
-// Beat: wave frequency locks to tempo subdivisions.
-// Phase resets on beatFired for crisp grid-locked patterns.
-
-static float resonPhaseOffset = 0.0f;
-
-void audioResonanceNodes(CRGB* buf, float t) {
-    float freq = 1.5f + bass*6.0f;
-
-    // On beat, reset phase offset to create a crisp snap
-    if (beatFired && tempoConfidence > 0.5f)
-        resonPhaseOffset = -t * 3.0f;   // cancel current phase accumulation
-
-    float tPhase = t * 3.0f + resonPhaseOffset;
-    float amp    = 0.2f + mid*1.5f;
-
-    // barPhase modulates amplitude for 4-beat breathing
-    float barMod = (tempoConfidence > 0.25f) ?
-                   (0.8f + 0.4f * sinf(barPhase * 6.2832f)) : 1.0f;
-
-    for (int e=0;e<NUM_EDGES;e++) {
-        float ePhase=(float)e/NUM_EDGES*3.14159f;
-        int base=e*LEDS_PER_EDGE;
-        for (int j=0;j<LEDS_PER_EDGE;j++) {
-            float lp=(float)j/(LEDS_PER_EDGE-1);
-            float wave=sinf(lp*freq*6.2832f+tPhase+ePhase);
-            float v=amp*barMod*(wave*0.5f+0.5f);
-            float spark=(inoise8(e*23+j*9,(uint16_t)(t*100.0f))/255.0f)*high;
-            buf[base+j]=applyPalette(constrain(v+spark,0.0f,1.0f));
-        }
-    }
-}
+// (Audio6 Resonance cut — per-edge standing waves lacked cross-corner coherence.)
 
 // ── Audio7: Pulse Web ─────────────────────────────────────
 // Beat: pulses spawn on beatFired. Decay rate matched to
@@ -741,6 +704,14 @@ void audioPulseWeb(CRGB* buf, float t) {
         for(int i=0;i<PWEB_COUNT;i++) pwebs[i].active=false;
         pwebInited=true;
     }
+
+    // audio bus → drivers
+    float bass = audio.sub()*0.6f + audio.bass();
+    float mid  = audio.lowMid()*0.5f + audio.mid() + audio.highMid()*0.5f;
+    float high = audio.presence() + audio.brilliance();
+    bool  beatFired = audio.beatFired;
+    float tempoConfidence = audio.tempoConfidence;
+    float beatPeriodMs = 60000.0f / audio.bpm;
 
     // Spawn on beat when confident, otherwise on bass transient
     bool doSpawn = (beatFired && tempoConfidence > 0.25f && bass > 0.02f) ||
@@ -789,6 +760,13 @@ void audioPulseWeb(CRGB* buf, float t) {
 static float helixFlare = 0.0f;
 
 void audioSpectrumHelix(CRGB* buf, float t) {
+    // audio bus → drivers
+    float bass = audio.sub()*0.6f + audio.bass();
+    float mid  = audio.lowMid()*0.5f + audio.mid() + audio.highMid()*0.5f;
+    bool  beatFired = audio.beatFired;
+    float bpm = audio.bpm;
+    float tempoConfidence = audio.tempoConfidence;
+
     // Lock rotation to tempo when confident
     float spinRate = (tempoConfidence > 0.5f) ?
                      (bpm / 60.0f * 0.08f) :
@@ -810,9 +788,10 @@ void audioSpectrumHelix(CRGB* buf, float t) {
         if(dTheta>0.5f) dTheta=1.0f-dTheta;
         float onHelix=expf(-dTheta*dTheta*80.0f)*expf(-r*r*12.0f);
 
-        int bin=constrain(2+(int)(z*50.0f),2,FFT_BINS-1);
-        float fv=constrain(fftBins[bin]*fftGain*10.0f,0.0f,1.0f);
-        float amb=(inoise8(i*13,ti)/255.0f)*constrain(voiceLevel*2.0f+0.15f,0.05f,0.4f);
+        // Height selects the perceptual band: bottom=sub … top=brilliance
+        int band = constrain((int)(z * NUM_BANDS), 0, NUM_BANDS - 1);
+        float fv = audio.band[band];
+        float amb=(inoise8(i*13,ti)/255.0f)*constrain(audio.level*2.0f+0.15f,0.05f,0.4f);
         float stripe=onHelix*(0.3f+fv*0.7f)+helixFlare*onHelix;
         buf[i]=applyPalette(constrain(amb+stripe,0.0f,1.0f));
     }
@@ -825,6 +804,14 @@ void audioSpectrumHelix(CRGB* buf, float t) {
 static float quakeLastBass=0,quakeRumbleEnv=0;
 
 void audioEarthquake(CRGB* buf, float t) {
+    // audio bus → drivers
+    float bass = audio.sub()*0.6f + audio.bass();
+    float mid  = audio.lowMid()*0.5f + audio.mid() + audio.highMid()*0.5f;
+    float high = audio.presence() + audio.brilliance();
+    bool  beatFired = audio.beatFired;
+    float barPhase = audio.barPhase;
+    float tempoConfidence = audio.tempoConfidence;
+
     // Reset rumble on beat
     if (beatFired && tempoConfidence > 0.25f)
         quakeRumbleEnv=constrain(quakeRumbleEnv+0.4f+bass*1.2f,0.0f,1.5f);
@@ -852,6 +839,101 @@ void audioEarthquake(CRGB* buf, float t) {
     }
 }
 
+// ── Audio: Flame ──────────────────────────────────────────
+// Beat/bass injects heat at graph nodes; heat diffuses along
+// the welded edge graph and cools, so fire crawls around the
+// wireframe and through corners (a bass-driven diffusion field).
+static float flameHeat[NUM_LEDS];
+static bool  flameInit    = false;
+static float flameLastBass = 0;
+
+void audioFlame(CRGB* buf, float t) {
+    float bass = audio.sub()*0.7f + audio.bass();
+    float mid  = audio.lowMid()*0.5f + audio.mid();
+    bool  beatFired = audio.beatFired;
+    float tempoConfidence = audio.tempoConfidence;
+
+    if (!flameInit) { for (int i=0;i<NUM_LEDS;i++) flameHeat[i]=0; flameInit=true; }
+
+    // Inject heat on beat or bass transient; splash to neighbours so it catches.
+    bool inject = (beatFired && tempoConfidence>0.25f) || (bass>flameLastBass*1.3f && bass>0.05f);
+    flameLastBass = bass;
+    if (inject) {
+        int seeds = 2 + (int)(bass*8.0f);
+        for (int k=0;k<seeds;k++) {
+            int idx=random(NUM_LEDS);
+            flameHeat[idx]=constrain(flameHeat[idx]+0.7f+bass*0.6f, 0.0f, 1.5f);
+            flameHeat[rdNeighborL[idx]]=max(flameHeat[rdNeighborL[idx]],0.5f);
+            flameHeat[rdNeighborR[idx]]=max(flameHeat[rdNeighborR[idx]],0.5f);
+        }
+    }
+    // Sparse embers from the mids keep it flickering between beats.
+    if (mid>0.1f && (int)random(100) < (int)(mid*40.0f)) flameHeat[random(NUM_LEDS)] += mid*0.5f;
+
+    // Spread along the graph, then cool (louder mids = more sustain).
+    graphBlur(flameHeat, 1, 0.28f);
+    float cool = 0.90f - constrain(mid*0.03f, 0.0f, 0.05f);
+    for (int i=0;i<NUM_LEDS;i++) {
+        flameHeat[i]*=cool;
+        buf[i]=applyPalette(constrain(flameHeat[i],0.0f,1.0f));
+    }
+}
+
+// ── Audio: Dendrite ───────────────────────────────────────
+// Beats spawn charges that walk the welded graph and fork,
+// branching around corners like lightning; a decaying charge
+// field leaves fading trails behind each tip.
+#define DEND_TIPS 24
+struct DendTip { bool active; int node; bool fwd; int life; float env; };
+static DendTip dendTips[DEND_TIPS];
+static float   dendCharge[NUM_LEDS];
+static bool    dendInit = false;
+
+static void dendSpawn(int node, bool fwd, float env, int life) {
+    for (int i=0;i<DEND_TIPS;i++)
+        if (!dendTips[i].active) { dendTips[i] = { true, node, fwd, life, env }; return; }
+}
+
+void audioDendrite(CRGB* buf, float t) {
+    float bass = audio.sub()*0.7f + audio.bass();
+    float high = audio.presence() + audio.brilliance();
+    bool  beatFired = audio.beatFired;
+    float tempoConfidence = audio.tempoConfidence;
+
+    if (!dendInit) {
+        for (int i=0;i<DEND_TIPS;i++) dendTips[i].active=false;
+        for (int i=0;i<NUM_LEDS;i++) dendCharge[i]=0;
+        dendInit=true;
+    }
+
+    // Strike on a confident beat (or a big bass hit): several branches
+    // from one node, each heading a random way around the graph.
+    bool strike = (beatFired && tempoConfidence>0.25f && bass>0.03f) || (bass>0.6f);
+    if (strike) {
+        int startNode = random(NUM_LEDS);
+        int branches  = 2 + (int)(bass*3.0f);
+        int life      = 12 + (int)(bass*10.0f);
+        for (int b=0;b<branches;b++) dendSpawn(startNode, (random(2)==0), 0.8f+bass*0.5f, life);
+    }
+
+    // Advance tips along the graph; occasionally fork the other way.
+    for (int i=0;i<DEND_TIPS;i++) {
+        if (!dendTips[i].active) continue;
+        DendTip &tp = dendTips[i];
+        dendCharge[tp.node] = max(dendCharge[tp.node], tp.env + high*0.4f);
+        tp.node = tp.fwd ? rdNeighborR[tp.node] : rdNeighborL[tp.node];
+        tp.life--;
+        if (tp.life>3 && random(100)<18) dendSpawn(tp.node, !tp.fwd, tp.env*0.7f, tp.life/2);
+        if (tp.life<=0) tp.active=false;
+    }
+
+    // Decay the charge field → fading dendrite trails.
+    for (int i=0;i<NUM_LEDS;i++) {
+        dendCharge[i]*=0.80f;
+        buf[i]=applyPalette(constrain(dendCharge[i],0.0f,1.0f));
+    }
+}
+
 ////////////////////////////////////////////////////////////
 // ================= VOICE ANIMATIONS =================
 ////////////////////////////////////////////////////////////
@@ -859,6 +941,8 @@ void audioEarthquake(CRGB* buf, float t) {
 // Voice0: Breathe
 void voiceBreathe(CRGB* buf, float t) {
   const float inv_sqrt3=0.57735f;
+  float speechEnergy = audio.speech;
+  float high = audio.presence() + audio.brilliance();
   float breath=0.06f+0.06f*sinf(t*1.1f), swell=speechEnergy*2.5f;
   float tipFlash=high*3.0f*expf(-high*2.0f);
   for (int i=0;i<NUM_LEDS;i++) {
@@ -871,6 +955,9 @@ void voiceBreathe(CRGB* buf, float t) {
 void voiceFormant(CRGB* buf, float t) {
   const float inv_sqrt3=0.57735f, bandW=0.12f;
   static float posA=0.15f,posB=0.85f,velA=0,velB=0;
+  float speechEnergy = audio.speech;
+  bool  syllableOnset = audio.syllableOnset;
+  float sylEnv = audio.sylEnv;
   float comp=speechEnergy*1.8f, tA=0.15f+comp*0.25f, tB=0.85f-comp*0.25f;
   if(syllableOnset){velA+=0.04f;velB-=0.04f;}
   velA+=(tA-posA)*0.08f; velB+=(tB-posB)*0.08f; velA*=0.75f; velB*=0.75f;
@@ -892,6 +979,9 @@ static HarmonicRing hrings[HRING_COUNT];
 static bool hringInited=false;
 
 void voiceHarmonicRings(CRGB* buf, float t) {
+  bool  syllableOnset = audio.syllableOnset;
+  float speechEnergy = audio.speech;
+  float voiceLevel = audio.level;
   if(!hringInited){for(int i=0;i<HRING_COUNT;i++) hrings[i].active=false;hringInited=true;}
   if(syllableOnset){for(int i=0;i<HRING_COUNT;i++) if(!hrings[i].active){hrings[i]={0.0f,0.6f+speechEnergy*1.5f,0.4f+speechEnergy*0.8f,true};break;}}
   for(int i=0;i<HRING_COUNT;i++){if(!hrings[i].active) continue;hrings[i].radius+=hrings[i].speed*0.011f;hrings[i].env*=0.93f;if(hrings[i].radius>1.5f||hrings[i].env<0.02f) hrings[i].active=false;}
@@ -903,28 +993,64 @@ void voiceHarmonicRings(CRGB* buf, float t) {
   }
 }
 
-// Voice3: Syllable Sparks
-#define SSPARK_COUNT 12
-struct SyllableSpark { bool active; int edge; bool forward; float pos,speed,env; };
-static SyllableSpark ssparks[SSPARK_COUNT];
+// Voice3: Syllable Sparks — sparks walk the welded edge graph,
+// flowing across corners instead of stopping at an edge end.
+#define SSPARK_COUNT 14
+#define SSPARK_TAIL  7
+struct GraphSpark { bool active; int node; bool fwd; float accum, speed, env; };
+static GraphSpark ssparks[SSPARK_COUNT];
 static bool ssparksInited=false;
 
-void fireSyllableSparks() {
-  int slot=0;
-  for(int e=0;e<NUM_EDGES&&slot<SSPARK_COUNT;e++) if(!ssparks[slot].active){ssparks[slot]={true,e,(random(2)==0),0.5f,0.6f+speechEnergy*1.2f,0.7f+sylEnv*0.5f};slot++;}
+void fireSyllableSparks(float speechEnergy, float sylEnv) {
+  int want = 2 + (int)(speechEnergy * 4.0f), spawned = 0;
+  for (int s=0; s<SSPARK_COUNT && spawned<want; s++) {
+    if (!ssparks[s].active) {
+      ssparks[s] = { true, (int)random(NUM_LEDS), (random(2)==0),
+                     0.0f, 0.4f + speechEnergy*0.9f, 0.7f + sylEnv*0.5f };
+      spawned++;
+    }
+  }
 }
 
 void voiceSyllableSparks(CRGB* buf, float t) {
-  if(!ssparksInited){for(int i=0;i<SSPARK_COUNT;i++) ssparks[i].active=false;ssparksInited=true;}
-  if(syllableOnset) fireSyllableSparks();
-  for(int i=0;i<SSPARK_COUNT;i++){if(!ssparks[i].active) continue;ssparks[i].pos+=ssparks[i].speed*0.011f*(ssparks[i].forward?1:-1);ssparks[i].env*=0.92f;if(ssparks[i].pos>1.05f||ssparks[i].pos<-0.05f||ssparks[i].env<0.02f) ssparks[i].active=false;}
-  for(int i=0;i<NUM_LEDS;i++) buf[i]=applyPalette(inoise8(i*17,(uint32_t)(t*80))/255.0f*voiceLevel*0.35f);
-  for(int i=0;i<SSPARK_COUNT;i++){
-    if(!ssparks[i].active) continue;
-    int base=ssparks[i].edge*LEDS_PER_EDGE; float head=ssparks[i].pos, tl=0.25f;
-    for(int j=0;j<LEDS_PER_EDGE;j++){
-      float lp=(float)j/(LEDS_PER_EDGE-1), db=ssparks[i].forward?head-lp:lp-head;
-      if(db>=0&&db<tl){float br=(1.0f-db/tl);br=br*br*ssparks[i].env;if(db<0.03f) br+=high*2.0f;int li=base+j;CRGB c=applyPalette(constrain(br,0.0f,1.0f));buf[li].r=qadd8(buf[li].r,c.r);buf[li].g=qadd8(buf[li].g,c.g);buf[li].b=qadd8(buf[li].b,c.b);}
+  bool  syllableOnset = audio.syllableOnset;
+  float speechEnergy  = audio.speech;
+  float sylEnv        = audio.sylEnv;
+  float high          = audio.presence() + audio.brilliance();
+  float voiceLevel    = audio.level;
+
+  if(!ssparksInited){for(int i=0;i<SSPARK_COUNT;i++) ssparks[i].active=false; ssparksInited=true;}
+  if(syllableOnset) fireSyllableSparks(speechEnergy, sylEnv);
+
+  // Ambient shimmer sampled at each LED's 3D position → continuous
+  // across edges/corners (no per-edge seams).
+  uint32_t ti=(uint32_t)(t*80.0f);
+  for(int i=0;i<NUM_LEDS;i++){
+    uint8_t n=inoise8((uint16_t)(voxels[i].x*140.0f+ti),
+                      (uint16_t)(voxels[i].y*140.0f),
+                      (uint16_t)(voxels[i].z*140.0f));
+    buf[i]=applyPalette(n/255.0f*voiceLevel*0.35f);
+  }
+
+  // Advance + render each spark walking the graph, with a fading
+  // tail trailing behind it around corners.
+  for(int s=0;s<SSPARK_COUNT;s++){
+    if(!ssparks[s].active) continue;
+    ssparks[s].accum += ssparks[s].speed;
+    while(ssparks[s].accum >= 1.0f){
+      ssparks[s].node = ssparks[s].fwd ? graphR(ssparks[s].node) : graphL(ssparks[s].node);
+      ssparks[s].accum -= 1.0f;
+    }
+    ssparks[s].env *= 0.94f;
+    if(ssparks[s].env < 0.03f){ ssparks[s].active=false; continue; }
+
+    int n=ssparks[s].node; float b=ssparks[s].env;
+    for(int k=0;k<SSPARK_TAIL;k++){
+      float br = b + (k==0 ? high*1.5f : 0.0f);
+      CRGB c=applyPalette(constrain(br,0.0f,1.0f));
+      buf[n].r=qadd8(buf[n].r,c.r); buf[n].g=qadd8(buf[n].g,c.g); buf[n].b=qadd8(buf[n].b,c.b);
+      n = ssparks[s].fwd ? graphL(n) : graphR(n);   // tail trails behind the head
+      b *= 0.6f;
     }
   }
 }
@@ -934,12 +1060,12 @@ void voiceSyllableSparks(CRGB* buf, float t) {
 ////////////////////////////////////////////////////////////
 
 const char* staticAnimNames[10] = {
-  "DiagFlow","Lissajous","GravPart","Sparkle","RD",
-  "MobiusBraid","EdgeBreathe","Plasma","Zipper","NoiseWorms"
+  "DiagFlow","Lissajous","GravPart","RD","MobiusBraid",
+  "Plasma","NoiseWorms","Coral","--","--"
 };
 const char* audioAnimNames[10] = {
-  "TriAxis","Impact","CellAuto","FreqBands","BassBloom",
-  "Vortex","Resonance","PulseWeb","SpectrHlix","Earthquake"
+  "TriAxis","Impact","CellAuto","BassBloom","Vortex",
+  "PulseWeb","SpectrHlix","Earthquake","Flame","Dendrite"
 };
 const char* voiceAnimNames[10] = {
   "Breathe","Formant","Rings","Sparks","Voice4",

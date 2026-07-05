@@ -6,3 +6,4 @@
 node_modules/
 sim/node_modules/
 sim/dist/
+.claude/
