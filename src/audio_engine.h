@@ -62,6 +62,7 @@ AudioBus audio;
 float reactivity      = 1.0f;   // overall band gain
 float beatSensitivity = 1.0f;   // >1 = more sensitive onset threshold
 float bandTilt        = 0.0f;   // -1 bass-heavy .. +1 treble-heavy
+float smoothFactor    = 0.4f;   // band EMA weight on new sample; lower = smoother/less flashy
 
 bool  audioMonitorEnabled = false;
 
@@ -160,7 +161,7 @@ void audioEngineUpdate() {
     float sum = 0;
     for (int i = BAND_LO[b]; i <= BAND_HI[b] && i < FFT_BINS; i++) sum += fftBins[i];
     sum /= (float)(BAND_HI[b] - BAND_LO[b] + 1);
-    smoothBand[b] = smoothBand[b] * 0.6f + sum * 0.4f;
+    smoothBand[b] = smoothBand[b] * (1.0f - smoothFactor) + sum * smoothFactor;
   }
 
   // ── 2. Room-noise AGC + features ─────────────────────────

@@ -96,6 +96,7 @@ AudioConnection          patchCord2(i2s1, 1, fft1024, 0);
 #define EEPROM_REACTIVITY_ADDR   8    // float
 #define EEPROM_BEATSENS_ADDR     12   // float
 #define EEPROM_BANDTILT_ADDR     16   // float
+#define EEPROM_SMOOTHFAC_ADDR    20   // float
 
 void EEPROMWriteFloat(int addr, float value) {
   byte* p = (byte*)(void*)&value;
@@ -120,6 +121,7 @@ void saveSettings() {
   EEPROMWriteFloat(EEPROM_REACTIVITY_ADDR, reactivity);
   EEPROMWriteFloat(EEPROM_BEATSENS_ADDR,   beatSensitivity);
   EEPROMWriteFloat(EEPROM_BANDTILT_ADDR,   bandTilt);
+  EEPROMWriteFloat(EEPROM_SMOOTHFAC_ADDR,  smoothFactor);
 }
 
 void loadSettings() {
@@ -129,7 +131,7 @@ void loadSettings() {
     staticIndex = audioIndex = voiceIndex = 0;
     currentPaletteIndex = 0;
     currentBrightness = 128;
-    reactivity = 1.0f; beatSensitivity = 1.0f; bandTilt = 0.0f;
+    reactivity = 1.0f; beatSensitivity = 1.0f; bandTilt = 0.0f; smoothFactor = 0.4f;
     currentPalette = previousPalette = palettes[0];
     paletteFading = false;
     applyBrightness();
@@ -160,9 +162,11 @@ void loadSettings() {
   reactivity      = EEPROMReadFloat(EEPROM_REACTIVITY_ADDR);
   beatSensitivity = EEPROMReadFloat(EEPROM_BEATSENS_ADDR);
   bandTilt        = EEPROMReadFloat(EEPROM_BANDTILT_ADDR);
+  smoothFactor    = EEPROMReadFloat(EEPROM_SMOOTHFAC_ADDR);
   if (isnan(reactivity)      || reactivity      < 0.1f || reactivity      > 3.0f)  reactivity      = 1.0f;
   if (isnan(beatSensitivity) || beatSensitivity < 0.1f || beatSensitivity > 3.0f)  beatSensitivity = 1.0f;
   if (isnan(bandTilt)        || bandTilt        < -1.0f || bandTilt       > 1.0f)  bandTilt        = 0.0f;
+  if (isnan(smoothFactor)    || smoothFactor    < 0.1f  || smoothFactor   > 0.5f)  smoothFactor    = 0.4f;
 }
 
 ////////////////////////////////////////////////////////////
@@ -252,21 +256,22 @@ const char* modeNames[4] = { "STATIC", "AUDIO", "VOICE", "ARTNET" };
 enum MenuState { TOP_NAV, TOP_EDIT, FFT_NAV, FFT_EDIT };
 enum TopRow { TOP_MODE, TOP_ANIM, TOP_PALETTE, TOP_BRIGHT, TOP_FFT, TOP_ROW_COUNT };
 
-// Audio submenu: 3 global knobs + Back
-#define AUDIO_ROW_COUNT 4
-#define AUDIO_ROW_BACK  3
+// Audio submenu: 4 global knobs + Back
+#define AUDIO_ROW_COUNT 5
+#define AUDIO_ROW_BACK  4
 
 MenuState menuState = TOP_NAV;
 TopRow    topRow    = TOP_MODE;
 int       fftRow    = 0;
 
-const char* audioParamNames[3] = { "React", "BeatSns", "Tilt" };
+const char* audioParamNames[4] = { "React", "BeatSns", "Tilt", "Smooth" };
 
 float& audioKnobRef(int row) {
   switch (row) {
     case 0: return reactivity;
     case 1: return beatSensitivity;
     case 2: return bandTilt;
+    case 3: return smoothFactor;
     default: return reactivity;
   }
 }
@@ -345,7 +350,7 @@ void updateOLED() {
       if (fftRow == r)
         display.fillTriangle(1, y, 1, y+7, 7, y+3, SSD1306_WHITE);
       display.setCursor(13, y);
-      if (r < 3) {
+      if (r < 4) {
         display.print(audioParamNames[r]);
         display.print(F(": "));
         display.print(audioKnobRef(r), 2);
@@ -403,8 +408,9 @@ void handleEncoder() {
 
     case FFT_EDIT: {
       float d = steps * 0.05f;
-      if (fftRow == 2) audioKnobRef(2)      = constrain(audioKnobRef(2) + d, -1.0f, 1.0f);   // Band Tilt
-      else             audioKnobRef(fftRow) = constrain(audioKnobRef(fftRow) + d, 0.1f, 3.0f);
+      if      (fftRow == 2) audioKnobRef(2) = constrain(audioKnobRef(2) + d, -1.0f, 1.0f);          // Band Tilt
+      else if (fftRow == 3) audioKnobRef(3) = constrain(audioKnobRef(3) + steps * 0.02f, 0.1f, 0.5f); // Smoothing
+      else                  audioKnobRef(fftRow) = constrain(audioKnobRef(fftRow) + d, 0.1f, 3.0f);
       break;
     }
   }
@@ -488,7 +494,7 @@ String serialBuffer;
 void printHelp() {
   Serial.println(F("\nEncoder: turn=scroll rows  press=enter/exit"));
   Serial.println(F("\nSerial commands:"));
-  Serial.println(F("react <v>  beatsens <v>  tilt <v>   (audio knobs)"));
+  Serial.println(F("react <v>  beatsens <v>  tilt <v>  smooth <v>   (audio knobs)"));
   Serial.println(F("status  save  help  mode  demo"));
   Serial.println(F("audio  — toggle live band/beat monitor"));
 }
@@ -498,6 +504,7 @@ void printStatus() {
   Serial.print(F("Reactivity : ")); Serial.println(reactivity, 2);
   Serial.print(F("Beat Sens  : ")); Serial.println(beatSensitivity, 2);
   Serial.print(F("Band Tilt  : ")); Serial.println(bandTilt, 2);
+  Serial.print(F("Smoothing  : ")); Serial.println(smoothFactor, 2);
 }
 
 ////////////////////////////////////////////////////////////
@@ -547,6 +554,7 @@ void handleSerial() {
       if      (serialBuffer.startsWith("react "))    reactivity      = constrain(serialBuffer.substring(6).toFloat(), 0.1f, 3.0f);
       else if (serialBuffer.startsWith("beatsens ")) beatSensitivity = constrain(serialBuffer.substring(9).toFloat(), 0.1f, 3.0f);
       else if (serialBuffer.startsWith("tilt "))     bandTilt        = constrain(serialBuffer.substring(5).toFloat(), -1.0f, 1.0f);
+      else if (serialBuffer.startsWith("smooth "))   smoothFactor    = constrain(serialBuffer.substring(7).toFloat(), 0.1f, 0.5f);
       else if (serialBuffer=="status")             printStatus();
       else if (serialBuffer=="mode")               printModeStatus();
       else if (serialBuffer=="save")             { saveSettings(); Serial.println(F("Saved.")); }
